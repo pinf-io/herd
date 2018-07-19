@@ -9,6 +9,7 @@
     "@nodeutils/defaults-deep": "^1.1.0",
     "async": "^2.6.1",
     "bluebird": "^3.5.1",
+    "deep-object-diff": "^1.1.0",
     "fs-extra": "^6.0.1",
     "internal-ip": "^3.0.1",
     "ipfs": "^0.29.3",

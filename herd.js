@@ -14,6 +14,7 @@ FS.existsAsync = function (path) {
 }
 const MINIMIST = require("minimist");
 const LODASH = require("lodash");
+const DEEPDIFF = require("deep-object-diff");
 const INTERNAL_IP = require('internal-ip');
 // https://github.com/libp2p/js-libp2p-websocket-star-rendezvous
 const RENDEZVOUS = require('libp2p-websocket-star-rendezvous');
@@ -28,6 +29,7 @@ const PEM = require('pem');
 // https://github.com/ipfs-shipyard/ipfs-pubsub-room
 const Room = require('ipfs-pubsub-room');
 const PeerId = require('peer-id');
+Promise.promisifyAll(PeerId);
 // https://github.com/libp2p/js-peer-info
 const PeerInfo = require('peer-info');
 Promise.promisifyAll(PeerInfo);
@@ -45,128 +47,96 @@ const Pushable = require('pull-pushable');
 const toStream = require('pull-stream-to-stream');
 
 
-const HOME_DIR = PATH.join(process.env.HOME, ".io.pinf", "herd");
+const HOME_DIR = PATH.join(process.env.HOME, ".io.pinf", "herd", "herds");
 const UNAME = CHILD_PROCESS.execSync("uname -a").toString();
 
 
+var LOCAL_NETWORK_IP = "";
 function log () {
     var args = Array.from(arguments);
-    Node.getLocalNetworkIP().then(function (ip) {
-        args.unshift("[herd][" + ip + "]");
-        console.log.apply(console, args);
-    });
+    args.unshift("[herd][" + LOCAL_NETWORK_IP + "]");
+    console.log.apply(console, args);
 }
 
 
 class Node {
 
-    static async FromFile (peerIdPath) {
+    static async ForNamespace (namespace) {
+        let node = new Node(namespace);
+        await node.init();
+        return node;
+    }
+
+    constructor (namespace) {
         let self = this;
 
-        return new Promise(function (resolve, reject) {
-
-            function init (id) {
-                PeerInfo.create(id, function (err, peerInfo) {
-                    if (err) return reject(err);
-
-                    log("Our peer id:", peerInfo.id.toB58String());
-
-                    return resolve(peerInfo);
-                });    
-            }
-
-            FS.exists(peerIdPath, function (exists) {
-                if (false && exists) {
-                    FS.readFile(peerIdPath, "utf8", function (err, info) {
-                        if (err) return reject(err);
-                        PeerId.createFromJSON(JSON.parse(info), function (err, id) {
-                            if (err) return reject(err);
-                            return init(id);
-                        });
-                    });
-                    return;
-                }
-                PeerId.create({
-                    bits: 1024
-                }, function (err, id) {
-                    if (err) return reject(err);
-                    log("Writing peer id to:", peerIdPath);
-                    FS.writeFile(peerIdPath, JSON.stringify(id.toJSON(), null, 4), "utf8", function (err) {
-                        if (err) return reject(err);
-                        init(id);
-                    });
-                })
-            });
-        }).then(async function (peerInfo) {
-
-            let node = new Node();
-            node.peerInfo = peerInfo;
-
-            log("Our peer id:", node.peerId);
-
-            node.herdVersion = require("./package.json").version;
-            node.address = "address";//await herdNetwork.getLocalNetworkAddress();
-
-            return node;
-        });
+        self.namespace = namespace;
+        self.homePath = PATH.join(HOME_DIR, namespace);
+        self.peerIdPath = PATH.join(self.homePath, ".peer.id");
     }
 
-    get peerId () {
-        return this.peerInfo.id.toB58String();
-    }
+    async init () {
+        let self = this;
 
-    get localNetworkIP () {
-        if (!Node._Node_ip) {
-            throw new Error("'Node._Node_ip' not yet available!");
+        if (!await FS.existsAsync(self.homePath)) {
+            await FS.mkdirsAsync(self.homePath);
         }
-        return Node._Node_ip;
-    }
 
-    static async getLocalNetworkIP () {
-        if (!Node._Node_ip_promise) {
-            Node._Node_ip_promise = INTERNAL_IP.v4().then(function (ip) {
-                Node._Node_ip = ip;
-                return ip;
+        if (!await FS.existsAsync(self.peerIdPath)) {
+
+            self.peerId = await PeerId.createAsync({
+                bits: 1024
             });
+
+            await FS.writeFileAsync(self.peerIdPath, JSON.stringify(self.peerId.toJSON(), null, 4), "utf8");
+        } else {
+            let info = await FS.readFileAsync(self.peerIdPath, "utf8");
+
+            self.peerId = await PeerId.createFromJSONAsync(JSON.parse(info));    
         }
-        return Node._Node_ip_promise;    
+
+        self.peerIdString = self.peerId.toB58String();
+        
+        self.peerInfo = await PeerInfo.createAsync(self.peerId);
+
+        self.localNetworkIP = await INTERNAL_IP.v4();
+        LOCAL_NETWORK_IP = self.localNetworkIP;
+
+        log("[Node] localNetworkIP:", self.localNetworkIP);
+        log("[Node] peerId:", self.peerIdString);
     }
 }
 
 class Herd {
 
-    static async ForOurNode () {
-        let herd = new Herd();
-        herd.peerInfo = await Node.FromFile(herd.peerIdPath);
-        return herd;
-    }
+    constructor (node) {
+        let self = this;
 
-    get version () {
-        return require("./package.json").version;
-    }
+        self.node = node;
+        self.version = require("./package.json").version;
 
-    get peerIdPath () {
-        return PATH.join(HOME_DIR, ".peer.id");
-    }
+        self.localBordcastNetwork = new LocalBroadcastNetwork(self);
 
-    get peerId () {
-        return this.peerInfo.peerId;
-    }
-
-    static get heartbeatStatePath () {
-        return PATH.join(HOME_DIR, ".heartbeat.state");
+        self.localNetworkBootstrapAddressPath = PATH.join(self.node.homePath, ".localbroadcastnetwork.bootstrap.address");
+    
+        self.heartbeatStatePath = PATH.join(self.node.homePath, ".heartbeat.state");
+        self.heartbeatState = (
+            FS.existsSync(self.heartbeatStatePath) &&
+            JSON.parse(FS.readFileSync(self.heartbeatStatePath, "utf8") || "{}")
+        ) || {};
     }
 
     async start (bootstrapAddress) {
         let self = this;
     
-        return new Promise(function (resolve, reject) {
+        await new Promise(function (resolve, reject) {
 
             var config = {
-                repo: PATH.join(HOME_DIR, "ipfs"),
+                repo: PATH.join(self.node.homePath, "ipfs"),
                 EXPERIMENTAL: {
                     pubsub: true
                 },
+                pass: self.node.peerIdString,
                 config: {
                     // List of ipfs peers that your daemon will connect to on startup.
                     // TODO: Get bootstrap address correct for slave nodes to connect to the master node that added them.
@@ -194,7 +164,7 @@ class Herd {
                 }
             };
 
-            log("IPFS config:", JSON.stringify(config, null, 4));
+            log("[herd] IPFS Config:", JSON.stringify(config, null, 4));
 
             self.ipfs = new IPFS(config);
 
@@ -210,112 +180,9 @@ class Herd {
             });
 
             self.ipfs.once('ready', resolve);
-
-        }).then(function () {
-
-            return self.getLocalNetworkAddress().then(function (address) {                
-
-                self.localNetworkAddress = address;
-
-                console.log("Bootstrap address:", self.localNetworkAddress);
-
-                return FS.writeFileAsync(self.localNetworkAddressPath, address, "utf8");
-            });
-        }).then(async function () {
-
-            self.localNetwork = new LocalNetwork(self);
-
-            return self.ipfs;
-
-        }).then(function () {
-
-
-            return Node.getLocalNetworkIP().then(function (ip) {
-
-log("onIPFSReady() !!!!");
-
-                // TODO: Use private key to protect messages
-                var room = Room(self.ipfs, 'io.pinf.herd/heartbeat');
-
-                room.on('subscribed', () => {
-                    log('subscribed to room');
-
-                    broadcast();
-                });
-
-                // NOTE: This event is not working
-                room.on('peer joined', function (peer) {
-                    log('peer ' + peer + ' joined');
-
-                    broadcast();
-                });
-                // NOTE: This event is not working
-                room.on('peer left', function (peer) {
-                    log('peer ' + peer + ' left');
-                });
-
-                var state = {};
-
-                function onMessage (message, from) {
-
-                    var obj = {};
-                    obj[message.peerId] = message;
-                    LODASH.merge(state, obj);
-
-                    FS.writeFile(Herd.heartbeatStatePath, JSON.stringify(state, null, 4), "utf8", function (err) {
-                        if (err) throw err;
-            
-                        log("Heartbeat state:", JSON.stringify(state, null, 4));
-                    });        
-                }
-
-                room.on('message', function (envelope) {
-                    onMessage(JSON.parse(envelope.data.toString()), envelope.from);
-                });
-
-                function broadcast () {
-                    log('broadcast identity to peers');
-
-                    room.broadcast(JSON.stringify({
-                        ip: ip,
-                        peerId: self.peerInfo.peerId,
-                        uname: UNAME,
-                        authorized_keys: ((function () {
-                            var path = PATH.join(process.env.HOME, ".ssh/authorized_keys");
-                            if (FS.existsSync(path)) {
-                                return FS.readFileSync(path, "utf8").split("\n");
-                            }
-                            return [];
-                        })())
-                    }, null, 4));
-
-                    //room.sendTo(peer, 'Hello ' + peer + '!');
-                }
-
-                var interval = setInterval(broadcast, 15 * 1000);
-
-                self.ipfs.on('stop', function () {
-                    if (interval) {
-                        clearInterval(interval);
-                        interval = null;
-                    }
-                });
-
-                return null;
-            });
         });
-    }
 
-    get localNetworkAddressPath () {
-        return PATH.join(HOME_DIR, ".localnetwork.address");;
-    }    
-
-    async getLocalNetworkAddress () {
-        let self = this;
-
-        let localNetworkIP = await Node.getLocalNetworkIP();
-
-        return new Promise(function (resolve, reject) {
+        self.localNetworkBootstrapAddress = await new Promise(function (resolve, reject) {
 
             self.ipfs.swarm.localAddrs(function (err, addresses) {
                 if (err) return reject(err);
@@ -328,7 +195,7 @@ log("onIPFSReady() !!!!");
                     return address.toString();
                 }).filter(function (address) {
                     return (
-                        (address.indexOf("/" + localNetworkIP + "/") !== -1) &&
+                        (address.indexOf("/" + self.node.localNetworkIP + "/") !== -1) &&
                         /\/ipfs\//.test(address)
                     );
                 });
@@ -340,15 +207,113 @@ log("onIPFSReady() !!!!");
                 return resolve(addresses[0]);
             });
         });
+
+        console.log("[herd] Local Network Bootstrap Address:", self.localNetworkBootstrapAddress);
+
+        await FS.writeFileAsync(self.localNetworkBootstrapAddressPath, self.localNetworkBootstrapAddress, "utf8");
+
+
+        await self.localBordcastNetwork.init();
+
+
+        // TODO: Use private key to protect messages
+        var room = Room(self.ipfs, '/io.pinf.herd/heartbeat');
+
+        room.on('subscribed', () => {
+
+            log("[Herd] Subscribed to '/io.pinf.herd/heartbeat'");
+
+            broadcast();
+        });
+
+        // NOTE: This event is not working
+        room.on('peer joined', function (peer) {
+
+            log("[Herd] Node '" + peer + "' joined");
+
+            broadcast();
+        });
+        // NOTE: This event is not working
+        room.on('peer left', function (peer) {
+
+            log("[Herd] Node '" + peer + "' left");
+
+        });
+
+        async function onMessage (message, from) {
+
+            if (self._updateNodesMapWithNode(self.heartbeatState, message)) {
+
+                log("[Herd] Heartbeat state:", JSON.stringify(self.heartbeatState, null, 4));
+
+                await FS.writeFileAsync(self.heartbeatStatePath, JSON.stringify(self.heartbeatState, null, 4), "utf8");
+            }
+        }
+
+        room.on('message', function (envelope) {
+            onMessage(JSON.parse(envelope.data.toString()), envelope.from);
+        });
+
+        function broadcast () {
+            room.broadcast(JSON.stringify(self.makeHerdBroadcastPayload(), null, 4));
+        }
+
+        var interval = setInterval(broadcast, 15 * 1000);
+
+        self.ipfs.on('stop', function () {
+            if (interval) {
+                clearInterval(interval);
+                interval = null;
+            }
+        });
     }
 
-    makeLocalNetworkPayload () {
+    makeLocalNetworkBroadcastPayload () {
         return {
-            peerId: this.peerInfo.peerId,
-            localNetworkIP: this.peerInfo.localNetworkIP,
-            address: this.localNetworkAddress,
+            peerId: this.node.peerIdString,
+            localNetworkIP: this.node.localNetworkIP,
+            localNetworkBootstrapAddress: this.localNetworkBootstrapAddress,
             herdVersion: this.version
         };
+    }
+
+    makeHerdBroadcastPayload () {
+        return LODASH.merge(this.makeLocalNetworkBroadcastPayload(), {
+            uname: UNAME,
+            authorized_keys: ((function () {
+                var path = PATH.join(process.env.HOME, ".ssh/authorized_keys");
+                if (FS.existsSync(path)) {
+                    return FS.readFileSync(path, "utf8").split("\n");
+                }
+                return [];
+            })())
+        });
+    }
+
+    _updateNodesMapWithNode (nodes, node) {
+        let self = this;
+        var diff = DEEPDIFF.diff(nodes[node.peerId] || {}, node);
+        if (!Object.keys(diff).length) {
+            // No changes
+            return false;
+        }
+        if (node.localNetworkIP) {
+            Object.keys(nodes).forEach(function (peerId) {
+                if (
+                    nodes[peerId].localNetworkIP === node.localNetworkIP &&
+                    peerId !== self.node.peerIdString
+                ) {
+                    delete nodes[peerId];
+                } else
+                if (!nodes[peerId].localNetworkIP) {
+                    delete nodes[peerId];
+                }
+            });
+        }
+        var obj = {};
+        obj[node.peerId] = node;
+        LODASH.merge(nodes, obj);
+        return true;
     }
 }
 
@@ -358,56 +323,67 @@ class HerdApi {
         this.herd = herd;
     }
 
-    async getLocalNetworkAddress () {
+    async getLocalNetworkBootstrapAddress () {
         let self = this;
-        let exists = await FS.existsAsync(self.herd.localNetworkAddressPath);
+        let exists = await FS.existsAsync(self.herd.localNetworkBootstrapAddressPath);
         if (!exists) return null;
-        return FS.readFileAsync(self.herd.localNetworkAddressPath, "utf8");
+        return FS.readFileAsync(self.herd.localNetworkBootstrapAddressPath, "utf8");
     }
 
-    async ensureMasterNode (verify) {
+    async ensureMasterNode () {
         let self = this;
 
-        log("[HerdApi] ensureMasterNode(verify)", verify);
+        let bootstrapAddress = null;
 
-        let bootstrapAddress = await self.getLocalNetworkAddress();
+        async function connect () {
 
-        function start () {
-            if (verify) {
-                throw new Error("Master node not running after trying to start it!");
-            }
-    
-            log("Signalling server is NOT running. Starting master node ...");
-    
-            return exports.StartMasterNodeProcess().then(function () {
-                return Promise.delay(5000).then(function () {
-                    return self.ensureMasterNode(true);
+            bootstrapAddress = await self.getLocalNetworkBootstrapAddress();
+
+            return new Promise(function (resolve, reject) {
+                // TODO: Use 'multiaddr'
+                const client = NET.createConnection({
+                    host: bootstrapAddress.replace(/.*\/ip4\/([^\/]+)\/.*/, "$1"),
+                    port: parseInt(bootstrapAddress.replace(/.*\/tcp\/([^\/]+)\/.*/, "$1"))
                 });
-            });
+                client.setTimeout(3 * 1000);
+                client.on('data', function (data) {
+                    if (data.toString().indexOf("/multistream/1.") !== 1) {
+                        return reject(new Error("Got incorrect handshake: " + data.toString()));
+                    }
+                    client.end();
+                });
+                client.on('error', reject);
+                client.on('end', resolve);
+            }).then(function () {
+                return true;
+            }).catch(function (err) {
+                console.error("[HerdApi] Warning: Error when pinging herd node:", err.message);
+                return false;
+            });            
         }
 
-        log("[HerdApi] ensureMasterNode() bootstrapAddress", bootstrapAddress);
+        if (await connect()) {
+            return bootstrapAddress;
+        }
+
+        log("[HerdApi] Herd node is NOT running. Starting herd ...");
+
+        await exports.StartMasterNodeProcess();
 
         return new Promise(function (resolve, reject) {
-            // TODO: Use 'multiaddr'
-            const client = NET.createConnection({
-                host: bootstrapAddress.replace(/.*\/ip4\/([^\/]+)\/.*/, "$1"),
-                port: parseInt(bootstrapAddress.replace(/.*\/tcp\/([^\/]+)\/.*/, "$1"))
-            });
-            client.setTimeout(3 * 1000);
-            client.on('data', function (data) {
-                if (data.toString().indexOf("/multistream/1.") !== 1) {
-                    return reject(new Error("Got incorrect handshake: " + data.toString()));
+            var count = 0;
+            var interval = setInterval(async function () {
+                count++;
+                if (await connect()) {
+                    clearInterval(interval);
+                    log("[HerdApi] Herd node now running");
+                    return resolve(bootstrapAddress);
                 }
-                client.end();
-            });
-            client.on('error', reject);
-            client.on('end', resolve);
-        }).catch(function (err) {
-            console.error("Warning: Error when pinging master node:", err.message);
-            return start();
-        }).then(function () {
-            return bootstrapAddress;
+                if (count > 10) {
+                    clearInterval(interval);
+                    return reject(new Error("[HerdApi] Timeout: Herd node not running after trying to start it!"));
+                }
+            }, 1000);
         });
     }
 
@@ -416,7 +392,7 @@ class HerdApi {
         function syncScript (scriptName) {
             return new Promise(function (resolve, reject) {
     
-                log("Syncing script '" + scriptName + "' to '" + clientUri + "' using scp");
+                log("[HerdApi] Syncing script '" + scriptName + "' to '" + clientUri + "' using scp");
     
                 var proc = SPAWN("scp", [
                     '-q',
@@ -450,7 +426,7 @@ class HerdApi {
     
             return new Promise(function (resolve, reject) {
     
-                log("Running shell script at '" + clientUri + "' using ssh");
+                log("[HerdApi] Running shell script at '" + clientUri + "' using ssh");
     
                 var proc = SPAWN("ssh", [
                     "-A",
@@ -475,7 +451,7 @@ class HerdApi {
                         code !== null &&
                         code !== 0
                     ) {
-                        return reject(new Error("Process exited with code: " + code));
+                        return reject(new Error("[HerdApi] Process exited with code: " + code));
                     }
                     resolve(null);
                 });
@@ -484,21 +460,32 @@ class HerdApi {
     }    
 
     async show () {
-        if (FS.existsSync(Herd.heartbeatStatePath)) {
-            process.stdout.write(JSON.stringify(JSON.parse(FS.readFileSync(Herd.heartbeatStatePath, "utf8")), null, 4) + "\n");
+        let self = this;
+        if (Object.keys(self.herd.localBordcastNetwork.nodes).length) {
+            process.stdout.write(JSON.stringify({
+                "localBordcastNetwork": {
+                    "nodes": self.herd.localBordcastNetwork.nodes
+                }
+            }, null, 4) + "\n");
         } else {
-            process.stdout.write("Not running\n");
+            process.stdout.write("[HerdApi] Local Broadcast Network has never been started!\n");
+        }
+        if (Object.keys(self.herd.heartbeatState).length) {
+            process.stdout.write(JSON.stringify({
+                "heartbeatState": self.herd.heartbeatState
+            }, null, 4) + "\n");
+        } else {
+            process.stdout.write("[HerdApi] IPFS has never been started!\n");
         }
     }
 
 }
 
-class LocalNetwork extends libp2p {
+class LocalBroadcastNetwork extends libp2p {
 
     constructor (herd) {
-
         super(defaultsDeep({
-            peerInfo: herd.peerInfo.peerInfo
+            peerInfo: herd.node.peerInfo
         }, {
             modules: {
                 transport: [ TCP ],
@@ -515,38 +502,39 @@ class LocalNetwork extends libp2p {
                 }
             }
         }));
+        this.herd = herd;
+        this.nodesFilepath = PATH.join(this.herd.node.homePath, ".localbroadcastnetwork.nodes");
+        this.nodes = (
+            FS.existsSync(this.nodesFilepath) &&
+            JSON.parse(FS.readFileSync(this.nodesFilepath, "utf8") || "{}")
+        ) || {};
+    }
 
+    async init () {
         let self = this;
 
-        self.nodesFilepath = PATH.join(HOME_DIR, ".localnetwork.nodes");
-        self.nodes = (
-            FS.existsSync(self.nodesFilepath) &&
-            JSON.parse(FS.readFileSync(self.nodesFilepath, "utf8") || "{}")
-        ) || {};
-        log("[LocalNetwork] Loaded cached swarm addresses:", JSON.stringify(self.nodes, null, 4));
-
-        herd.peerInfo.peerInfo.multiaddrs.add('/ip4/0.0.0.0/tcp/0');
-
-        self.updateNode(herd.peerId, herd.makeLocalNetworkPayload());
+        self.herd.node.peerInfo.multiaddrs.add('/ip4/0.0.0.0/tcp/0');
 
         self.start(function (err) {
             if (err) throw err;
+
+            self.updateNode(self.herd.node.peerIdString, self.herd.makeLocalNetworkBroadcastPayload());
 
             var peers = {};
 
             self.on('peer:connect', function (peer) {
                 const id = peer.id.toB58String();
-                console.log("[LocalNetwork] peer:connect:", id);
+                console.log("[LocalBroadcastNetwork] Node '" + id + "' connected");
             });
             self.on('peer:disconnect', function (peer) {
                 const id = peer.id.toB58String();
-                console.log("[LocalNetwork] peer:disconnect:", id);
+                console.log("[LocalBroadcastNetwork] Node '" + id + "' disconnected");
                 if (!peers[id]) return;
                 peers[id].disconnect();
             });
             self.on('peer:discovery', function (peer) {
                 const id = peer.id.toB58String();
-                //console.log("[LocalNetwork] peer:discovery:", id);
+                //console.log("[LocalBroadcastNetwork] peer:discovery:", id);
                 if (peers[id]) {
                     peers[id].lastDiscoveryTime = Date.now();
                     return;
@@ -557,12 +545,12 @@ class LocalNetwork extends libp2p {
                     lastDiscoveryTime: Date.now(),
                     connect: function () {
                         
-                        console.log("[LocalNetwork] Connect to node using 'io-pinf-herd-local-network' protocol:", id);
+                        console.log("[LocalBroadcastNetwork] Connect to node '" + id + "' using '/io-pinf-herd/local-broadcast-network' protocol:", id);
 
                         // TODO: Dial until it works
-                        self.dialProtocol(peer, '/io-pinf-herd/local-network', function (err, conn) {
+                        self.dialProtocol(peer, '/io-pinf-herd/local-broadcast-network', function (err, conn) {
                             if (err) {
-                                console.error("[LocalNetwork] Warning: Error dialing discovered node:", err.message);
+                                console.error("[LocalBroadcastNetwork] Warning: Error dialing discovered node '" + id + "':", err.message);
                                 return;
                             }
 
@@ -587,13 +575,13 @@ class LocalNetwork extends libp2p {
                     },
                     onConnected: function () {
 
-                        console.log("[LocalNetwork] Connected peer:", id);
+                        console.log("[LocalBroadcastNetwork] Send payload to node '" + id + "'");
 
-                        peers[id].sendMessage(herd.makeLocalNetworkPayload());
+                        peers[id].sendMessage(self.herd.makeLocalNetworkBroadcastPayload());
                     },
                     onMessage: function (message) {
 
-                        console.log("[LocalNetwork] Received message:", message);
+                        //console.log("[LocalBroadcastNetwork] Received message:", message);
 
                         self.updateNode(id, message);
                     },
@@ -609,7 +597,7 @@ class LocalNetwork extends libp2p {
                 peers[id].connect();                    
             });
 
-            self.handle('/io-pinf-herd/local-network', function (protocol, conn) {
+            self.handle('/io-pinf-herd/local-broadcast-network', function (protocol, conn) {
 
                 const p = Pushable();
                 pull(p, conn);
@@ -620,13 +608,13 @@ class LocalNetwork extends libp2p {
 
                 function onMessage (message) {
 
-                    console.log("[LocalNetwork] Received client message:", message);
-
                     if (message.peerId) {
                         self.updateNode(message.peerId, message);
                     }
 
-                    sendMessage(herd.makeLocalNetworkPayload());
+                    console.log("[LocalBroadcastNetwork] Send payload to node '" + message.peerId + "'");
+
+                    sendMessage(self.herd.makeLocalNetworkBroadcastPayload());
                 }
 
                 // Feed received messages to message handler
@@ -641,43 +629,15 @@ class LocalNetwork extends libp2p {
         });
     }
 
-    updateNode (peerId, properties) {
+    async updateNode (peerId, node) {
         let self = this;
 
-        console.log("[LocalNetwork] Update node:", peerId, properties);
+        if (self.herd._updateNodesMapWithNode(self.nodes, node)) {
 
-        if (properties.localNetworkIP) {
-            Object.keys(self.nodes).forEach(function (id) {
-                if (
-                    (
-                        self.nodes[id].localNetworkIP === properties.localNetworkIP &&
-                        id !== peerId
-                    ) || (
-                        id === peerId &&
-                        self.nodes[id].localNetworkIP !== properties.localNetworkIP
-                    )
-                ) {
-                    log("[LocalNetwork] Node IP changed from '" + self.nodes[id].localNetworkIP + "' to '" + properties.localNetworkIP + "' for peer id:", peerId);
-                    delete self.nodes[id];
-                } else
-                if (!self.nodes[id].localNetworkIP) {
-                    delete self.nodes[id];
-                }
-            });
+            await FS.writeFileAsync(self.nodesFilepath, JSON.stringify(self.nodes, null, 4), "utf8");
+
+            console.log("[LocalBroadcastNetwork] Nodes:", JSON.stringify(self.nodes, null, 4));
         }
-
-        self.nodes[peerId] = self.nodes[peerId] || {};
-
-        Object.keys(properties).forEach(function (name) {
-            self.nodes[peerId][name] = properties[name];
-        });
-
-        FS.writeFile(self.nodesFilepath, JSON.stringify(self.nodes, null, 4), "utf8", function (err) {
-            if (err) throw err;
-
-            console.log("[LocalNetwork] Updated nodes:", JSON.stringify(self.nodes, null, 4));
-
-        });
     }
 
     getBootstrapAddresses () {
@@ -728,12 +688,11 @@ class CLI {
 
     static async RunForArgs (args) {
 
-        let herd = await Herd.ForOurNode();
+        let node = await Node.ForNamespace("default");
+        let herd = new Herd(node);
         let herdApi = new HerdApi(herd);
 
-        let command = args._[0];
-
-        switch (command) {
+        switch (args._[0]) {
 
             case 'show':
                 await herdApi.show();

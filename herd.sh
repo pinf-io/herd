@@ -53,8 +53,6 @@ if [ "${1}" == "remotestart" ]; then
             # Start peer node
             ##################################################
 
-            echo "[herd.sh] bootstrapAddress: ${bootstrapAddress}"
-
             node --eval 'require("./herd.js").StartPeerNodeProcess("'${bootstrapAddress}'");'
 
             # NOTE: This message is matched in 'herd.js' to kill the ssh connection.
