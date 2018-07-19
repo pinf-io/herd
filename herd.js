@@ -387,7 +387,7 @@ class HerdApi {
         });
     }
 
-    async addClientNode (clientUri, bootstrapAddress) {
+    async addNode (clientUri, bootstrapAddress) {
 
         function syncScript (scriptName) {
             return new Promise(function (resolve, reject) {
@@ -441,7 +441,7 @@ class HerdApi {
                 });
                 proc.stdout.on("data", function (chunk) {
                     process.stdout.write(chunk);
-                    if (/\[herd\.sh\] PEER NODE STARTED!/.test(chunk.toString())) {
+                    if (/\[herd\.sh\] HERD NODE STARTED!/.test(chunk.toString())) {
                         proc.kill('SIGKILL');
                     }
                 });
@@ -699,7 +699,7 @@ class CLI {
                 break;
 
             case 'add':
-                await herdApi.addClientNode(args._[1], await herdApi.ensureMasterNode());
+                await herdApi.addNode(args._[1], await herdApi.ensureMasterNode());
                 break;
 
             case 'start':
@@ -752,7 +752,6 @@ function startSignallingServer () {
     });
 }
 */
-
 /*
 function set2 () {
     
@@ -783,4 +782,13 @@ function set2 () {
 
     }
 }
+*/
+/*
+#if [ -e "cat /etc/*release" ]; then
+    #eval "$(cat /etc/*release | sed -e 's/^/_OS_/')"
+
+    #if [ "${_OS_ID}" == "ubuntu" ] && [[ "${_OS_VERSION_ID}" == "16."* ]]; then
+        echo -e "\n[herd.sh]   NOTE: To start io.pinf.herd on OS boot run 'sudo ~/.io.pinf/herd/node_modules/.bin/pm2 startup' on the remote system.\n"
+    #fi
+#fi
 */

@@ -39,14 +39,7 @@ if [ "${1}" == "remotestart" ]; then
                 echo "[herd.sh] Installing dependencies ..."
                 npm install
 
-                #if [ -e "cat /etc/*release" ]; then
-
-                    #eval "$(cat /etc/*release | sed -e 's/^/_OS_/')"
-
-                    #if [ "${_OS_ID}" == "ubuntu" ] && [[ "${_OS_VERSION_ID}" == "16."* ]]; then
-                        echo -e "\n[herd.sh]   NOTE: To start io.pinf.herd on OS boot run 'sudo ~/.io.pinf/herd/node_modules/.bin/pm2 startup' on the remote system.\n"
-                    #fi
-                #fi
+                echo -e "\n[herd.sh]   NOTE: To start io.pinf.herd on OS boot run 'sudo ~/.io.pinf/herd/node_modules/.bin/pm2 startup' on the remote system.\n"
             fi
 
             ##################################################
@@ -56,7 +49,7 @@ if [ "${1}" == "remotestart" ]; then
             node --eval 'require("./herd.js").StartPeerNodeProcess("'${bootstrapAddress}'");'
 
             # NOTE: This message is matched in 'herd.js' to kill the ssh connection.
-            echo "[herd.sh] PEER NODE STARTED!"
+            echo "[herd.sh] HERD NODE STARTED!"
 
         popd > /dev/null
 
