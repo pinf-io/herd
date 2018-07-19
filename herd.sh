@@ -6,8 +6,7 @@ if [ "${1}" == "remotestart" ]; then
     # Called via ssh on a remote system
     ##################################################
 
-    peerId="${2}"
-    signallingAddress="${3}"
+    bootstrapAddress="${2}"
 
     pushd ~/ > /dev/null
 
@@ -54,10 +53,9 @@ if [ "${1}" == "remotestart" ]; then
             # Start peer node
             ##################################################
 
-            echo "[herd.sh] peerId: ${peerId}"
-            echo "[herd.sh] signallingAddress: ${signallingAddress}"
+            echo "[herd.sh] bootstrapAddress: ${bootstrapAddress}"
 
-            node --eval 'require("./herd.js").startPeerNodeProcess("'${peerId}'", "'${signallingAddress}'");'
+            node --eval 'require("./herd.js").StartPeerNodeProcess("'${bootstrapAddress}'");'
 
             # NOTE: This message is matched in 'herd.js' to kill the ssh connection.
             echo "[herd.sh] PEER NODE STARTED!"
@@ -90,6 +88,6 @@ else
 
     echo -e "\n[herd.sh]   NOTE: To start io.pinf.herd on OS boot run 'sudo ~/.io.pinf/herd/node_modules/.bin/pm2 startup'.\n"
 
-    node --eval 'require("./herd.js").startMasterNodeProcess();'
+    node --eval 'require("./herd.js").StartMasterNodeProcess();'
 
 fi
