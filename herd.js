@@ -43,7 +43,7 @@ const defaultsDeep = require('@nodeutils/defaults-deep');
 const MulticastDNS = require('libp2p-mdns');
 const Pushable = require('pull-pushable');
 const toStream = require('pull-stream-to-stream');
-
+const EventEmitter = require('events');
 
 const HOME_DIR = PATH.join(process.env.HOME, ".io.pinf", "herd", "herds");
 const UNAME = CHILD_PROCESS.execSync("uname -a").toString();
@@ -227,6 +227,10 @@ class Herd {
         self.ipfsPeerIdString = self.localNetworkBootstrapAddress.replace(/^.+\/ipfs\/([^\/]+)$/, "$1");
 
 
+        self.localBordcastNetwork.on("nodes", function (nodes) {
+
+console.log("NODES", nodes);            
+        });
         await self.localBordcastNetwork.init();
 
 
@@ -515,10 +519,12 @@ class HerdApi {
 }
 
 
-class LocalBroadcastNetwork extends libp2p {
+class LocalBroadcastNetwork extends EventEmitter {
 
     constructor (herd) {
-        super(defaultsDeep({
+        super();
+        let self = this;
+        self.libp2p = new libp2p(defaultsDeep({
             peerInfo: herd.node.peerInfo
         }, {
             modules: {
@@ -536,7 +542,6 @@ class LocalBroadcastNetwork extends libp2p {
                 }
             }
         }));
-        let self = this;
         self.herd = herd;
         self.nodesFilepath = PATH.join(self.herd.node.homePath, ".localbroadcastnetwork.nodes");
         self.nodes = (
@@ -554,7 +559,7 @@ class LocalBroadcastNetwork extends libp2p {
 
         self.herd.node.peerInfo.multiaddrs.add('/ip4/0.0.0.0/tcp/0');
 
-        self.start(function (err) {
+        self.libp2p.start(function (err) {
             if (err) throw err;
 
             let message = self.herd.makeLocalNetworkBroadcastPayload();
@@ -563,17 +568,17 @@ class LocalBroadcastNetwork extends libp2p {
 
             var peers = {};
 
-            self.on('peer:connect', function (peer) {
+            self.libp2p.on('peer:connect', function (peer) {
                 const id = peer.id.toB58String();
                 console.log("[LocalBroadcastNetwork] Node '" + id + "' connected");
             });
-            self.on('peer:disconnect', function (peer) {
+            self.libp2p.on('peer:disconnect', function (peer) {
                 const id = peer.id.toB58String();
                 console.log("[LocalBroadcastNetwork] Node '" + id + "' disconnected");
                 if (!peers[id]) return;
                 peers[id].disconnect();
             });
-            self.on('peer:discovery', function (peer) {
+            self.libp2p.on('peer:discovery', function (peer) {
                 const id = peer.id.toB58String();
                 //console.log("[LocalBroadcastNetwork] peer:discovery:", id);
                 if (peers[id]) {
@@ -594,7 +599,7 @@ class LocalBroadcastNetwork extends libp2p {
                         console.log("[LocalBroadcastNetwork] Connect to node '" + id + "' using '/io-pinf-herd/local-broadcast-network' protocol");
 
                         // TODO: Dial until it works
-                        self.dialProtocol(peer, '/io-pinf-herd/local-broadcast-network', function (err, conn) {
+                        self.libp2p.dialProtocol(peer, '/io-pinf-herd/local-broadcast-network', function (err, conn) {
                             if (err) {
                                 console.error("[LocalBroadcastNetwork] Warning: Error dialing discovered node '" + id + "':", err.message);
                                 return;
@@ -649,7 +654,7 @@ class LocalBroadcastNetwork extends libp2p {
                 peers[id].connect();                    
             });
 
-            self.handle('/io-pinf-herd/local-broadcast-network', function (protocol, conn) {
+            self.libp2p.handle('/io-pinf-herd/local-broadcast-network', function (protocol, conn) {
 
                 const p = Pushable();
                 pull(p, conn);
@@ -689,6 +694,8 @@ class LocalBroadcastNetwork extends libp2p {
             await FS.writeFileAsync(self.nodesFilepath, JSON.stringify(self.nodes, null, 4), "utf8");
 
             console.log("[LocalBroadcastNetwork] Nodes:", JSON.stringify(self.nodes, null, 4));
+
+            self.emit("nodes", self.nodes);
         }
     }
 
