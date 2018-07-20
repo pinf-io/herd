@@ -115,7 +115,7 @@ class Herd {
         self.node = node;
         self.version = require("./package.json").version;
 
-        self.localBordcastNetwork = new LocalBroadcastNetwork(self);
+//        self.localBordcastNetwork = new LocalBroadcastNetwork(self);
 
         self.localNetworkBootstrapAddressPath = PATH.join(self.node.homePath, ".localbroadcastnetwork.bootstrap.address");
     
@@ -124,12 +124,20 @@ class Herd {
             FS.existsSync(self.heartbeatStatePath) &&
             JSON.parse(FS.readFileSync(self.heartbeatStatePath, "utf8") || "{}")
         ) || {};
+        Object.keys(self.heartbeatState).forEach(function (peerId) {
+            self.heartbeatState[peerId].connected = false;
+        });
     }
 
     async start (bootstrapAddress) {
         let self = this;
-    
+
         await new Promise(function (resolve, reject) {
+
+            // TODO: Disable mdns broadcast for local network and use 'localBordcastNetwork' to gather
+            //       bootstrap addresses to connect to.
+            //       This will prevent random IPFS nodes from connecting to our nodes by not being able to find them.
+            // TODO: Use swarm key once available in 'ipfs-js' to secure which IPFS nodes can connect
 
             var config = {
                 repo: PATH.join(self.node.homePath, "ipfs"),
@@ -140,7 +148,7 @@ class Herd {
                 config: {
                     // List of ipfs peers that your daemon will connect to on startup.
                     // TODO: Get bootstrap address correct for slave nodes to connect to the master node that added them.
-                    "Bootstrap": (bootstrapAddress && [ bootstrapAddress ]) || [],
+                    "Bootstrap": [],//(bootstrapAddress && [ bootstrapAddress ]) || [],
                     "Addresses": {
                         // Addresses that the local daemon will listen on for connections from other ipfs peers.
                         // Ensure that these addresses can be dialed from a separate computer and that there are no firewalls blocking the ports you specify.
@@ -212,8 +220,10 @@ class Herd {
 
         await FS.writeFileAsync(self.localNetworkBootstrapAddressPath, self.localNetworkBootstrapAddress, "utf8");
 
+        self.ipfsPeerIdString = self.localNetworkBootstrapAddress.replace(/^.+\/ipfs\/([^\/]+)$/, "$1");
 
-        await self.localBordcastNetwork.init();
+
+//        await self.localBordcastNetwork.init();
 
 
         // TODO: Use private key to protect messages
@@ -238,16 +248,35 @@ class Herd {
 
             log("[Herd] Node '" + peer + "' left");
 
+            Object.keys(self.heartbeatState).forEach(function (peerId) {
+                if (self.heartbeatState[peerId].ipfsPeerId === peer) {
+                    updateNode({
+                        peerId: peerId,
+                        connected: false
+                    });
+                }
+            });
         });
 
-        async function onMessage (message, from) {
+        async function updateNode (node) {
 
-            if (self._updateNodesMapWithNode(self.heartbeatState, message)) {
+            if (node.localNetworkBootstrapAddress) {
+                node.ipfsPeerId = node.localNetworkBootstrapAddress.replace(/^.+\/ipfs\/([^\/]+)$/, "$1");
+            }
+
+            if (self._updateNodesMapWithNode(self.heartbeatState, node)) {
 
                 log("[Herd] Heartbeat state:", JSON.stringify(self.heartbeatState, null, 4));
 
                 await FS.writeFileAsync(self.heartbeatStatePath, JSON.stringify(self.heartbeatState, null, 4), "utf8");
             }
+        }
+
+        async function onMessage (message, from) {
+
+            message.connected = true;
+
+            updateNode(message);
         }
 
         room.on('message', function (envelope) {
@@ -481,6 +510,7 @@ class HerdApi {
 
 }
 
+/*
 class LocalBroadcastNetwork extends libp2p {
 
     constructor (herd) {
@@ -502,12 +532,16 @@ class LocalBroadcastNetwork extends libp2p {
                 }
             }
         }));
-        this.herd = herd;
-        this.nodesFilepath = PATH.join(this.herd.node.homePath, ".localbroadcastnetwork.nodes");
-        this.nodes = (
-            FS.existsSync(this.nodesFilepath) &&
-            JSON.parse(FS.readFileSync(this.nodesFilepath, "utf8") || "{}")
+        let self = this;
+        self.herd = herd;
+        self.nodesFilepath = PATH.join(self.herd.node.homePath, ".localbroadcastnetwork.nodes");
+        self.nodes = (
+            FS.existsSync(self.nodesFilepath) &&
+            JSON.parse(FS.readFileSync(self.nodesFilepath, "utf8") || "{}")
         ) || {};
+        Object.keys(self.nodes).forEach(function (peerId) {
+            self.nodes[peerId].connected = false;
+        });
     }
 
     async init () {
@@ -518,7 +552,9 @@ class LocalBroadcastNetwork extends libp2p {
         self.start(function (err) {
             if (err) throw err;
 
-            self.updateNode(self.herd.node.peerIdString, self.herd.makeLocalNetworkBroadcastPayload());
+            let message = self.herd.makeLocalNetworkBroadcastPayload();
+            message.connected = true;
+            self.updateNode(message);
 
             var peers = {};
 
@@ -544,8 +580,13 @@ class LocalBroadcastNetwork extends libp2p {
                     connectTime: Date.now(),
                     lastDiscoveryTime: Date.now(),
                     connect: function () {
-                        
-                        console.log("[LocalBroadcastNetwork] Connect to node '" + id + "' using '/io-pinf-herd/local-broadcast-network' protocol:", id);
+
+                        if (id === self.herd.ipfsPeerIdString) {
+                            // No need to connect to our IPFS node.
+                            return;
+                        }
+
+                        console.log("[LocalBroadcastNetwork] Connect to node '" + id + "' using '/io-pinf-herd/local-broadcast-network' protocol");
 
                         // TODO: Dial until it works
                         self.dialProtocol(peer, '/io-pinf-herd/local-broadcast-network', function (err, conn) {
@@ -583,12 +624,18 @@ class LocalBroadcastNetwork extends libp2p {
 
                         //console.log("[LocalBroadcastNetwork] Received message:", message);
 
-                        self.updateNode(id, message);
+                        message.connected = true;
+
+                        self.updateNode(message);
                     },
                     sendMessage: function (message) {
                         peers[id].sendMessage._sender(message);
                     },
                     disconnect: function () {
+                        self.updateNode({
+                            peerId: id,
+                            connected: false
+                        });
                         peers[id] = null;
                         delete peers[id];
                     }
@@ -608,9 +655,9 @@ class LocalBroadcastNetwork extends libp2p {
 
                 function onMessage (message) {
 
-                    if (message.peerId) {
-                        self.updateNode(message.peerId, message);
-                    }
+                    message.connected = true;
+
+                    self.updateNode(message);
 
                     console.log("[LocalBroadcastNetwork] Send payload to node '" + message.peerId + "'");
 
@@ -629,7 +676,7 @@ class LocalBroadcastNetwork extends libp2p {
         });
     }
 
-    async updateNode (peerId, node) {
+    async updateNode (node) {
         let self = this;
 
         if (self.herd._updateNodesMapWithNode(self.nodes, node)) {
@@ -640,14 +687,8 @@ class LocalBroadcastNetwork extends libp2p {
         }
     }
 
-    getBootstrapAddresses () {
-        let self = this;
-        return Object.keys(self.nodes).map(function (node) {
-            return node.address;
-        });
-    }
-
 }
+*/
 
 // ####################################################################################################
 // # Entry Points
