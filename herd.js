@@ -21,6 +21,9 @@ const NET = require("net");
 const EventEmitter = require('events');
 const PEM = require('pem');
 
+const PM2 = require('pm2');
+Promise.promisifyAll(PM2);
+
 const IPFS = require('ipfs');
 // https://github.com/ipfs-shipyard/ipfs-pubsub-room
 const Room = require('ipfs-pubsub-room');
@@ -105,10 +108,6 @@ class CLI {
     }
 
     static async StartMasterNodeProcess () {
-
-        const PM2 = require('pm2');
-        Promise.promisifyAll(PM2);
-
         log("StartMasterNodeProcess()");
         try {
             await PM2.connectAsync();
@@ -124,10 +123,6 @@ class CLI {
     }
     
     static async StartPeerNodeProcess (bootstrapAddress) {
-
-        const PM2 = require('pm2');
-        Promise.promisifyAll(PM2);
-
         log("StartPeerNodeProcess(bootstrapAddress)", bootstrapAddress);
         try {
             await PM2.connectAsync();
