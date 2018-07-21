@@ -10,6 +10,7 @@ FS.existsAsync = function (path) {
         return FS.exists(path, resolve);
     });
 }
+const CRYPTO = require("crypto");
 const MINIMIST = require("minimist");
 const LODASH_MERGE = require("lodash/merge");
 const LODASH_VALUES = require("lodash/values");
@@ -226,6 +227,8 @@ class Herd extends EventEmitter {
         if ((await self._decryptMessage(self._encryptMessage({ test: 'success' }))).test !== 'success') {
             throw new Error("[Herd] Private key sanity check failed!");
         }
+
+        self.privateKeyHash = CRYPTO.createHash('sha1').update(self.privateKey).digest('hex');
 
         self.bootstrapAddresses = (await FS.existsAsync(self.bootstrapAddressesPath) && JSON.parse(await FS.readFileAsync(self.bootstrapAddressesPath, "utf8") || "{}")) || {};
 
@@ -478,7 +481,9 @@ class Herd extends EventEmitter {
     async _decryptMessage (message) {
         let self = this;
         try {
-            return JWT.verifyAsync(message, self.privateKey);
+            message = await JWT.verifyAsync(message, self.privateKey);
+            delete message.iat;
+            return message;
         } catch (err) {
             throw new Error("[Herd] Error decrypting received message!");
         }
@@ -681,11 +686,11 @@ class HerdNetwork {
 
 
         // TODO: Use private key to protect messages
-        var room = Room(self.ipfs, '/io.pinf.herd/heartbeat');
+        var room = Room(self.ipfs, '/io.pinf.herd/heartbeat/' + self.herd.privateKeyHash);
 
         room.on('subscribed', () => {
 
-            log("[Herd] Subscribed to '/io.pinf.herd/heartbeat'");
+            log("[Herd] Subscribed to '/io.pinf.herd/heartbeat/" + self.herd.privateKeyHash + "'");
 
             broadcast();
         });
@@ -823,10 +828,10 @@ class LocalBroadcastNetwork extends EventEmitter {
                             return;
                         }
 
-                        console.log("[LocalBroadcastNetwork] Connect to node '" + id + "' using '/io-pinf-herd/local-broadcast-network' protocol");
+                        console.log("[LocalBroadcastNetwork] Connect to node '" + id + "' using '/io-pinf-herd/local-broadcast-network/" + self.network.herd.privateKeyHash + "' protocol");
 
                         // TODO: Dial until it works
-                        self.libp2p.dialProtocol(peer, '/io-pinf-herd/local-broadcast-network', function (err, conn) {
+                        self.libp2p.dialProtocol(peer, '/io-pinf-herd/local-broadcast-network/' + self.network.herd.privateKeyHash, function (err, conn) {
                             if (err) {
                                 console.error("[LocalBroadcastNetwork] Warning: Error dialing discovered node '" + id + "':", err.message);
                                 return;
@@ -883,7 +888,7 @@ class LocalBroadcastNetwork extends EventEmitter {
                 peers[id].connect();                    
             });
 
-            self.libp2p.handle('/io-pinf-herd/local-broadcast-network', function (protocol, conn) {
+            self.libp2p.handle('/io-pinf-herd/local-broadcast-network/' + self.network.herd.privateKeyHash, function (protocol, conn) {
 
                 const p = Pushable();
                 pull(p, conn);
