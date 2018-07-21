@@ -3,12 +3,21 @@
 set -e
 
 function sourceNode {
+
+    echo "[herd.sh] uname: $(uname -a)"
+
     if [ ! -e "${HOME}/.nvm/nvm.sh" ]; then
         echo "[herd.sh] 'node' and '~/.nvm/nvm.sh' not found! Please install on remote host first: https://github.com/creationix/nvm"
         exit 1
     fi
+
+    echo "[herd.sh] sourcing '${HOME}/.nvm/nvm.sh' to install NodeJS 10"
+    echo "[herd.sh] NOTE: If this fails, login to the server yourself to install NodeJS 10 using 'nvm install 10'"
+
     . "${HOME}/.nvm/nvm.sh"
-    nvm use 10 || nvm install 10
+    nvm install 10
+
+    echo "[herd.sh] node: '$(node --version)'"
 }
 
 if ! which node > /dev/null ; then
