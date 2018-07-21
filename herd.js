@@ -515,9 +515,6 @@ class Herd extends EventEmitter {
                     nodePeerId !== self.node.peerIdString
                 ) {
                     delete nodes[nodePeerId];
-                } else
-                if (!nodes[nodePeerId].localNetworkIP) {
-                    delete nodes[nodePeerId];
                 }
             });
         }
