@@ -12,6 +12,8 @@ FS.existsAsync = function (path) {
 }
 const MINIMIST = require("minimist");
 const LODASH_MERGE = require("lodash/merge");
+const LODASH_VALUES = require("lodash/values");
+const LODASH_DEBOUNCE = require("lodash/debounce");
 const DEEPDIFF = require("deep-object-diff");
 const INTERNAL_IP = require('internal-ip');
 const CHILD_PROCESS = require("child_process");
@@ -20,6 +22,9 @@ const SPAWN = CHILD_PROCESS.spawn;
 const NET = require("net");
 const EventEmitter = require('events');
 const PEM = require('pem');
+Promise.promisifyAll(PEM);
+const JWT = require('jsonwebtoken');
+Promise.promisifyAll(JWT);
 
 const PM2 = require('pm2');
 Promise.promisifyAll(PM2);
@@ -62,7 +67,11 @@ setImmediate(function () {
     if (require.main === module) {
         async function main () {
             try {
-                await CLI.RunForArgs(MINIMIST(process.argv.slice(2)));
+                await CLI.RunForArgs(MINIMIST(process.argv.slice(2), {
+                    boolean: [
+                        "daemonize"
+                    ]
+                }));
             } catch (err) {
                 console.error("[herd]", err);
                 process.exit(1);
@@ -81,13 +90,41 @@ class CLI {
     static async RunForArgs (args) {
 
         let node = await Node.ForNamespace(args.ns || "default");
-        let herd = new Herd(node);
+        let herd = await Herd.ForNode(node);
 
         function network () {
             return new HerdNetwork(herd);
         }
 
+        async function start (bootstrapAddress) {
+            if (bootstrapAddress) {
+                await herd.updateBootstrapAddress(bootstrapAddress);
+            }
+            if (args.daemonize) {
+                await herd.startNodeProcess();
+            } else {
+                await network().start();
+            }
+        }
+
+        if (args.help) {
+            console.log("Usage: herd");
+            console.log("  bootstrap [--daemonize] <address>");
+            console.log("  run [--daemonize]");
+            console.log("  show");
+            console.log("  add <user@server>");
+            return;
+        }
+        
         switch (args._[0]) {
+
+            case 'bootstrap':
+                await start(args._[1]);
+                break;
+
+            case 'run':
+                await start();
+                break;
 
             case 'show':
                 await herd.show();
@@ -97,48 +134,13 @@ class CLI {
                 await herd.addNode(args._[1], await herd.ensureMasterNode());
                 break;
 
-            case 'start':
-                await network().start(args._[1]);
-                break;
-
             default:
-                await network().start();
-                break;
-        }
-    }
-
-    static async StartMasterNodeProcess () {
-        log("StartMasterNodeProcess()");
-        try {
-            await PM2.connectAsync();
-            await PM2.startAsync({
-                script: 'herd.js',
-                name: 'io.pinf.herd'
-            });
-            PM2.disconnect();
-        } catch (err) {
-            console.error(err);
-            process.exit(1);
-        }
-    }
-    
-    static async StartPeerNodeProcess (bootstrapAddress) {
-        log("StartPeerNodeProcess(bootstrapAddress)", bootstrapAddress);
-        try {
-            await PM2.connectAsync();
-            await PM2.startAsync({
-                script: 'herd.js',
-                name: 'io.pinf.herd',
-                args: 'start ' + bootstrapAddress
-            });
-            PM2.disconnect();
-        } catch (err) {
-            console.error(err);
-            process.exit(1);
+                args.daemonize = true;
+                await start();
+                break
         }
     }
 }
-exports.CLI = CLI;
 
 // ####################################################################################################
 
@@ -191,22 +193,65 @@ class Node {
 
 class Herd extends EventEmitter {
 
+    static async ForNode (node) {
+        let herd = new Herd(node);
+        await herd.init();
+        return herd;
+    }
+
     constructor (node) {
         super();
         let self = this;
 
         self.node = node;
         self.version = require("./package.json").version;
-        self.localNetworkBootstrapAddressPath = PATH.join(self.node.homePath, ".localbroadcastnetwork.bootstrap.address");
+        self.localNetworkBootstrapAddressPath = PATH.join(self.node.homePath, ".localnetwork.bootstrap.address");
+
+        self.bootstrapAddressesPath = PATH.join(self.node.homePath, ".ipfsnetwork.bootstrap.addresses");
+
+        self.privateKeyPath = PATH.join(self.node.homePath, ".shared.private.key");
+    }
+
+    async init () {
+        let self = this;
+
+        let exists = await FS.existsAsync(self.privateKeyPath);
+        if (!exists) {
+            log("[Herd] Generating shared private key for herd ...");
+            self.privateKey = (await PEM.createPrivateKeyAsync(2048, { cipher:'aes256' })).key;
+            await FS.outputFileAsync(self.privateKeyPath, self.privateKey, "utf8");
+        } else {
+            self.privateKey = await FS.readFileAsync(self.privateKeyPath, "utf8");
+        }
+        if ((await self._decryptMessage(self._encryptMessage({ test: 'success' }))).test !== 'success') {
+            throw new Error("[Herd] Private key sanity check failed!");
+        }
+
+        self.bootstrapAddresses = (await FS.existsAsync(self.bootstrapAddressesPath) && JSON.parse(await FS.readFileAsync(self.bootstrapAddressesPath, "utf8") || "{}")) || {};
 
         self.nodes = {};
-        [
-            "herdnetwork",
+        var announceNodes = LODASH_DEBOUNCE(function () {
+            log("[Herd] Nodes:", JSON.stringify(self.nodes.herd, null, 4));
+        }, 5 * 1000);
+        await Promise.mapSeries([
+            "herd",
+            "ipfsnetwork",
             "localbroadcastnetwork"
-        ].forEach(function (networkType) {
+        ], async function (networkType) {
 
-            var path = PATH.join(self.node.homePath, "." + networkType + ".nodes");
-            var nodes = (FS.existsSync(path) && JSON.parse(FS.readFileSync(path, "utf8") || "{}")) || {};
+            let path = PATH.join(self.node.homePath, "." + networkType + ".nodes");
+            let nodes = (await FS.existsAsync(path) && JSON.parse(await FS.readFileAsync(path, "utf8") || "{}")) || {};
+
+            if (networkType !== "herd") {
+                function forward (suffix) {
+                    return function (data) {
+                        self.emit("herd" + suffix, data);
+                    }
+                }
+                self.on(networkType + ":start", forward(":start"));
+                self.on(networkType + ":stop", forward(":stop"));
+                self.on(networkType + ":node", forward(":node"));
+            }
 
             function setDisconnected () {
                 Object.keys(nodes).forEach(function (nodePeerId) {
@@ -223,14 +268,37 @@ class Herd extends EventEmitter {
 
                 if (self._updateNodesMapWithNode(nodes, node)) {
 
-                    log("[Herd] " + networkType + " nodes:", JSON.stringify(nodes, null, 4));
+                    Object.keys(nodes).forEach(function (nodePeerId) {
+                        if (nodes[nodePeerId].ipfsLocalNetworkBootstrapAddress) {
+                            self.updateBootstrapAddress(nodes[nodePeerId].ipfsLocalNetworkBootstrapAddress);
+                        }
+                    });
 
                     await FS.writeFileAsync(path, JSON.stringify(nodes, null, 4), "utf8");
+
+                    if (networkType === "herd") {
+                        announceNodes();
+                    }
                 }
             });
 
             self.nodes[networkType] = nodes;
-        });
+        });    
+    }
+
+    async updateBootstrapAddress (ipfsLocalNetworkBootstrapAddress) {
+        let self = this;
+        let ipfsPeerId = ipfsLocalNetworkBootstrapAddress.replace(/^.+\/ipfs\/([^\/]+)$/, "$1");
+        if (
+            ipfsLocalNetworkBootstrapAddress.indexOf("/ip4/" + self.node.localNetworkIP + "/") === 0 ||
+            self.bootstrapAddresses[ipfsPeerId] === ipfsLocalNetworkBootstrapAddress
+        ) {
+            return;
+        }
+        self.bootstrapAddresses[ipfsPeerId] = ipfsLocalNetworkBootstrapAddress;
+        await FS.writeFileAsync(self.bootstrapAddressesPath, JSON.stringify(self.bootstrapAddresses, null, 4), "utf8");
+
+        self.emit("bootstrap:addresses", LODASH_VALUES(self.bootstrapAddresses));
     }
 
     async getLocalNetworkBootstrapAddress () {
@@ -248,6 +316,9 @@ class Herd extends EventEmitter {
         async function connect () {
 
             bootstrapAddress = await self.getLocalNetworkBootstrapAddress();
+            if (!bootstrapAddress) {
+                return false;
+            }
 
             return new Promise(function (resolve, reject) {
                 // TODO: Use 'multiaddr'
@@ -278,7 +349,7 @@ class Herd extends EventEmitter {
 
         log("[Herd] Herd node is NOT running. Starting herd ...");
 
-        await CLI.StartMasterNodeProcess();
+        await self.startNodeProcess();
 
         return new Promise(function (resolve, reject) {
             var count = 0;
@@ -297,19 +368,40 @@ class Herd extends EventEmitter {
         });
     }
 
-    async addNode (clientUri, bootstrapAddress) {
+    async startNodeProcess () {
+        let self = this;
+        log("StartNodeProcess()");
+        log("NOTE: To start io.pinf.herd on OS boot run 'sudo " + process.execPath + " " + self.node.homePath + "/node_modules/.bin/pm2 startup'");
+        try {
+            await PM2.connectAsync();
+            await PM2.startAsync({
+                cwd: __dirname,
+                script: PATH.basename(__filename),
+                name: 'io.pinf.herd',
+                args: 'run',
+                interpreter: process.execPath
+            });
+            PM2.disconnect();
+        } catch (err) {
+            console.error(err);
+            process.exit(1);
+        }
+    }
 
-        function syncScript (scriptName) {
+    async addNode (clientUri, bootstrapAddress) {
+        let self = this;
+
+        function syncFile (name, path) {
             return new Promise(function (resolve, reject) {
     
-                log("[Herd] Syncing script '" + scriptName + "' to '" + clientUri + "' using scp");
+                log("[Herd] Syncing script '" + name + "' to '" + clientUri + "' using scp");
     
                 var proc = SPAWN("scp", [
                     '-q',
                     '-o LogLevel=QUIET',
                     '-o ConnectTimeout=5',
-                    PATH.join(__dirname, scriptName),
-                    clientUri + ":~/.io.pinf." + scriptName
+                    PATH.resolve(__dirname, path || name),
+                    clientUri + ":~/.~io.pinf~" + name
                 ], {
                     stdio: [
                         "ignore",
@@ -328,20 +420,21 @@ class Herd extends EventEmitter {
         }
     
         return Promise.all([
-            syncScript("herd.sh"),
-            syncScript("herd.js"),
-            syncScript("package.json")
-            // TODO: Sync private key to server so we can protect the IPFS nodes
+            syncFile("herd.sh"),
+            syncFile("herd.js"),
+            syncFile("package.json"),
+            syncFile("npm-shrinkwrap.json"),
+            syncFile(PATH.basename(self.privateKeyPath), self.privateKeyPath)
         ]).then(function () {
-    
+
             return new Promise(function (resolve, reject) {
-    
+
                 log("[Herd] Running shell script at '" + clientUri + "' using ssh");
-    
+
                 var proc = SPAWN("ssh", [
                     "-A",
                     clientUri,
-                    'bash ~/.io.pinf.herd.sh remotestart ' + bootstrapAddress
+                    'bash ~/.~io.pinf~herd.sh --namespace ' + self.node.namespace + ' remotestart ' + bootstrapAddress
                 ], {
                     stdio: [
                         "ignore",
@@ -375,6 +468,18 @@ class Herd extends EventEmitter {
             process.stdout.write(JSON.stringify(self.nodes, null, 4) + "\n");
         } else {
             process.stdout.write("[Herd] Node has never been started!\n");
+        }
+    }
+
+    _encryptMessage (message) {
+        return JWT.sign(message, this.privateKey);
+    }
+
+    async _decryptMessage (message) {
+        try {
+            return JWT.verifyAsync(message, this.privateKey);
+        } catch (err) {
+            throw new Error("[Herd] Error decrypting received message!");
         }
     }
 
@@ -427,12 +532,12 @@ class HerdNetwork {
         self.localBordcastNetwork = new LocalBroadcastNetwork(self);
     }
 
-    async start (bootstrapAddress) {
+    async start () {
         let self = this;
 
         console.log("|\n|\n|[Herd] ============================== START ==============================\n|\n|");
         
-        self.herd.emit("herdnetwork:start");
+        self.herd.emit("ipfsnetwork:start");
 
         log("[HerdNetwork] localNetworkIP:", self.herd.node.localNetworkIP);
         log("[HerdNetwork] nodePeerId:", self.herd.node.peerIdString);
@@ -452,7 +557,7 @@ class HerdNetwork {
                 config: {
                     // List of ipfs peers that your daemon will connect to on startup.
                     // TODO: Get bootstrap address correct for slave nodes to connect to the master node that added them.
-                    "Bootstrap": [],//(bootstrapAddress && [ bootstrapAddress ]) || [],
+                    "Bootstrap": LODASH_VALUES(self.herd.bootstrapAddresses),//(bootstrapAddress && [ bootstrapAddress ]) || [],
                     "Addresses": {
                         // Addresses that the local daemon will listen on for connections from other ipfs peers.
                         // Ensure that these addresses can be dialed from a separate computer and that there are no firewalls blocking the ports you specify.
@@ -497,10 +602,40 @@ class HerdNetwork {
             });
 
             self.ipfs.once('stop', function () {
-                self.herd.emit("herdnetwork:stop");
+                self.herd.emit("ipfsnetwork:stop");
             });
 
             self.ipfs.once('ready', resolve);
+            
+            self.herd.on("bootstrap:addresses", function (bootstrapAddresses) {
+
+                var addresses = {};
+                bootstrapAddresses.forEach(function (address) {
+                    addresses[address] = true;
+                });
+                var remove = [];
+                self.ipfs.bootstrap.list(function (err, result) {
+                    if (err) throw err;
+
+                    result.Peers.forEach(function (address) {
+                        delete addresses[address];
+                        if (!addresses[address]) {
+                            remove.push(address);
+                        }
+                    });
+
+                    Object.keys(addresses).forEach(function (address) {
+                        self.ipfs.bootstrap.add(address, function (err) {
+                            if (err) throw err;
+                        });
+                    });
+                    remove.forEach(function (address) {
+                        self.ipfs.bootstrap.rm(address, function (err) {
+                            if (err) throw err;
+                        });
+                    });                
+                });
+            });            
         });
 
         self.localNetworkBootstrapAddress = await new Promise(function (resolve, reject) {
@@ -566,7 +701,7 @@ class HerdNetwork {
 
             log("[Herd] Node '" + ipfsPeerId + "' left");
 
-            self.herd.emit("herdnetwork:node", {
+            self.herd.emit("ipfsnetwork:node", {
                 ipfsPeerId: ipfsPeerId,
                 connected: false
             });
@@ -578,7 +713,7 @@ class HerdNetwork {
                 return;
             }
             message.connected = true;
-            self.herd.emit("herdnetwork:node", message);
+            self.herd.emit("ipfsnetwork:node", message);
         });
 
         function broadcast () {
