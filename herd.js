@@ -476,8 +476,9 @@ class Herd extends EventEmitter {
     }
 
     async _decryptMessage (message) {
+        let self = this;
         try {
-            return JWT.verifyAsync(message, this.privateKey);
+            return JWT.verifyAsync(message, self.privateKey);
         } catch (err) {
             throw new Error("[Herd] Error decrypting received message!");
         }
@@ -707,8 +708,8 @@ class HerdNetwork {
             });
         });
 
-        room.on('message', function (envelope) {
-            var message = JSON.parse(envelope.data.toString());
+        room.on('message', async function (envelope) {
+            var message = await self.herd._decryptMessage(envelope.data.toString());
             if (message.ipfsPeerId !== envelope.from) {
                 return;
             }
@@ -717,7 +718,7 @@ class HerdNetwork {
         });
 
         function broadcast () {
-            room.broadcast(JSON.stringify(self.makeHerdBroadcastPayload(), null, 4));
+            room.broadcast(self.herd._encryptMessage(self.makeHerdBroadcastPayload()));
         }
 
         var interval = setInterval(broadcast, 15 * 1000);
@@ -835,7 +836,7 @@ class LocalBroadcastNetwork extends EventEmitter {
                             pull(conn, function (read) {
                                 read(null, function next (end, data) {
                                     if (end) return;
-                                    peers[id].onMessage(JSON.parse(data.toString()));
+                                    peers[id].onMessage(data.toString());
                                     read(null, next)
                                 });
                             });
@@ -856,7 +857,9 @@ class LocalBroadcastNetwork extends EventEmitter {
 
                         peers[id].sendMessage(self.network.makeLocalNetworkBroadcastPayload());
                     },
-                    onMessage: function (message) {
+                    onMessage: async function (message) {
+
+                        message = await self.network.herd._decryptMessage(message);
 
                         //console.log("[LocalBroadcastNetwork] Received message:", message);
 
@@ -886,7 +889,7 @@ class LocalBroadcastNetwork extends EventEmitter {
                 pull(p, conn);
 
                 function sendMessage (message) {
-                    p.push(JSON.stringify(message));
+                    p.push(self.network.herd._encryptMessage(message));
                 }
 
                 function onMessage (message) {
