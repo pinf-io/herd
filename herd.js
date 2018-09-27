@@ -54,8 +54,10 @@ const toStream = require('pull-stream-to-stream');
 //const multiaddr = require('multiaddr');
 
 // ####################################################################################################
-// # Main
+// # Bootstrap
 // ####################################################################################################
+
+// TODO: Declare logger
 
 var LOCAL_NETWORK_IP = "";
 function log () {
