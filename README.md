@@ -3,7 +3,7 @@ herd
 
 | Herd a bunch of nodes (ssh accessible servers) into a herd.
 
-Uses [IPFS](https://github.com/ipfs/js-ipfs) to connect a bunch of nodes into a cohesive whole. Intended for low volume, small data, fault tolerant chatter between nodes in the herd. Ideal for providing the networked computing node foundation for a distributed software toolchain.
+Uses [IPFS](https://github.com/ipfs/js-ipfs) to connect a bunch of nodes into a cohesive whole. Intended for low volume, small data, fault tolerant chatter between nodes in the herd. Ideal for providing the node-based networked computing foundation for a distributed software toolchain.
 
 Features:
 
