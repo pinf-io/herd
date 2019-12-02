@@ -1,0 +1,8 @@
+{
+    "herd#": "../../inf.json",
+    "herd#spread": {
+        "bash": (bash () >>>
+            echo "Hello World!"
+        <<<)
+    }
+}

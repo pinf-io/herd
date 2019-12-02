@@ -1,0 +1,20 @@
+{
+    "herd#": "../../inf.json",
+    "herd#spread": {
+        "inf": {
+            "test#": "bash.origin.test",
+            "test#/main.sh": (bash () >>>
+                echo "Hello World!"
+            <<<),
+            "test#expect": (text () >>>
+            Hello World!
+            <<<),
+            "herd#broadcast": {
+                "message": "Test OK"
+            }        
+        }
+    },
+    "herd#broadcast": {
+        "message": "Spread OK"
+    }
+}
